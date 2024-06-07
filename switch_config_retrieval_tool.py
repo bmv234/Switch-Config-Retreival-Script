@@ -1,7 +1,7 @@
 import argparse
 import csv
 from getpass import getpass
-from netmiko import ConnectHandler, NetMikoTimeoutException, NetMikoAuthenticationException
+from netmiko import ConnectHandler, NetMikoTimeoutException, NetMikoAuthenticationException, ReadTimeout
 import os
 import logging
 
@@ -13,23 +13,48 @@ logging.basicConfig(level=logging.INFO,
 
 def save_config(ip, username, password, enable_password, output_dir):
     #session_log = f"session_log_{ip}.txt"
-    device_params = {
+
+    device_params_ssh = {
         'device_type': 'dell_force10',  # Dell switches are stubborn and this device_type still works for most Cisco switches
         'host': ip,
         'username': username,
         'password': password,
         'secret': enable_password,
+        'timeout': 100,
+        'blocking_timeout': 8,
+        'banner_timeout': 200,
+        'auth_timeout': 50,
         #'global_delay_factor': 2,  # Adjust delay factor if needed
         #'session_log': session_log,  # Enable session logging
         #'global_cmd_verify': False  # Turn off global command verification
+
+    }
+
+    device_params_telnet = {
+        'device_type': 'dell_dnos6_telnet',
+        'host': ip,
+        'username': username,
+        'password': password,
+        'secret': enable_password,
+        'timeout': 100,
+        'blocking_timeout': 8,
+        'banner_timeout': 200,
+        'auth_timeout': 50,
     }
 
     try:
         logging.info(f"Attempting to connect to {ip} using SSH...")
-        net_connect = ConnectHandler(**device_params)
-    except (NetMikoTimeoutException, NetMikoAuthenticationException, OSError) as ssh_error:
+        net_connect = ConnectHandler(**device_params_ssh)
+    except (NetMikoTimeoutException, NetMikoAuthenticationException, OSError, ReadTimeout) as ssh_error:
         logging.error(f"SSH connection to {ip} failed: {ssh_error}")
-        return
+        logging.info(f"Attempting to connect to {ip} using Telnet...")
+        try:
+            net_connect = ConnectHandler(**device_params_telnet)
+            logging.warning(f"Warning: Telnet is not secure. Reconfigure the switch {ip} to use SSH.")
+        except (NetMikoTimeoutException, NetMikoAuthenticationException, OSError, ReadTimeout) as telnet_error:
+            logging.error(f"Telnet connection to {ip} failed: {telnet_error}")
+            logging.error(f"Failed to connect to {ip} using both SSH and Telnet.")
+            return
 
     try:
         logging.info(f"Entering enable mode on {ip}...")
@@ -37,6 +62,9 @@ def save_config(ip, username, password, enable_password, output_dir):
 
         logging.info(f"Setting terminal length on {ip}...")
         net_connect.send_command('terminal length 0')
+
+        # Retrieve the hostname
+        hostname = net_connect.find_prompt().strip('#').strip('>')
 
         logging.info(f"Connected to {ip}. Retrieving running configuration using command: 'show running-config'")
         running_config = net_connect.send_command(
@@ -47,7 +75,7 @@ def save_config(ip, username, password, enable_password, output_dir):
             read_timeout=60
         )
         
-        output_file = os.path.join(output_dir, f'{ip}_config.txt')
+        output_file = os.path.join(output_dir, f'{ip}_{hostname}_config.txt')
         with open(output_file, 'w') as file:
             file.write(running_config.strip())
         
@@ -55,7 +83,6 @@ def save_config(ip, username, password, enable_password, output_dir):
         logging.info(f"Configuration saved for {ip} to {output_file}")
     except Exception as e:
         logging.error(f"An error occurred while retrieving the configuration from {ip}: {e}")
-        #logging.error(f"Check the session log for more details: {session_log}")
 
 def parse_ips_from_file(file_path):
     ip_list = []
